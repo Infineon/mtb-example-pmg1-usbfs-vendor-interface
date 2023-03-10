@@ -1,14 +1,14 @@
 /******************************************************************************
  * File Name:   main.c
  *
- * Description: This is the source code for the USB FS bulk loop Example
+ * Description: This is the source code for the USB FS Vendor Interface Example
  *              for ModusToolbox.
  *
  * Related Document: See README.md
  *
  *
 *******************************************************************************
-* Copyright 2021-2022, Cypress Semiconductor Corporation (an Infineon company) or
+* Copyright 2021-2023, Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
 *
 * This software, including source code, documentation and related
@@ -47,15 +47,23 @@
 #include "cybsp.h"
 #include "cy_usb_dev.h"
 #include "cycfg_usbdev.h"
+#include "stdio.h"
+#include <inttypes.h>
 
 /*******************************************************************************
  * Macros
  ********************************************************************************/
-#define USB_BUFFER_SIZE (64u)
+#define CY_ASSERT_FAILED     (0u)
 
-#define IN_EP_NUM       (1u)
-#define OUT_EP_NUM      (2u)
+/* Array size */
+#define USB_BUFFER_SIZE      (64u)
 
+/* The IN and OUT data endpoint number. */
+#define IN_EP_NUM            (1u)
+#define OUT_EP_NUM           (2u)
+
+/* Debug print macro to enable UART print */
+#define DEBUG_PRINT          (0u)
 
 /*******************************************************************************
  * Function Prototypes
@@ -71,23 +79,66 @@ static void usb_low_isr(void);
 /* USB Interrupt Configuration */
 const cy_stc_sysint_t usb_high_interrupt_cfg =
 {
-        .intrSrc = (IRQn_Type) usb_interrupt_hi_IRQn,
-        .intrPriority = 0U,
+    .intrSrc = (IRQn_Type) usb_interrupt_hi_IRQn,
+    .intrPriority = 0U,
 };
 const cy_stc_sysint_t usb_medium_interrupt_cfg =
 {
-        .intrSrc = (IRQn_Type) usb_interrupt_med_IRQn,
-        .intrPriority = 1U,
+    .intrSrc = (IRQn_Type) usb_interrupt_med_IRQn,
+    .intrPriority = 1U,
 };
 const cy_stc_sysint_t usb_low_interrupt_cfg =
 {
-        .intrSrc = (IRQn_Type) usb_interrupt_lo_IRQn,
-        .intrPriority = 2U,
+    .intrSrc = (IRQn_Type) usb_interrupt_lo_IRQn,
+    .intrPriority = 2U,
 };
 
 /* USBDEV context variables */
 cy_stc_usbfs_dev_drv_context_t usb_drvContext;
 cy_stc_usb_dev_context_t usb_devContext;
+
+/* Stores the USBFS return code following specific operations */
+cy_en_usb_dev_status_t status;
+
+/* Array containing the data bytes received from host */
+uint8_t buffer[USB_BUFFER_SIZE];
+
+#if DEBUG_PRINT
+
+/* Debug print macro to enable UART print */
+cy_stc_scb_uart_context_t UART_context;
+
+/* Variable used for tracking the print status */
+volatile bool ENTER_LOOP = true;
+
+/*******************************************************************************
+* Function Name: check_status
+********************************************************************************
+* Summary:
+*  Prints the error message.
+*
+* Parameters:
+*  error_msg - message to print if any error encountered.
+*  status - status obtained after evaluation.
+*
+* Return:
+*  void
+*
+*******************************************************************************/
+void check_status(char *message, cy_rslt_t status)
+{
+    char error_msg[50];
+
+    sprintf(error_msg, "Error Code: 0x%08" PRIX32 "\n", status);
+
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "\r\n=====================================================\r\n");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "\nFAIL: ");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, message);
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "\r\n");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, error_msg);
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "\r\n=====================================================\r\n");
+}
+#endif
 
 /*******************************************************************************
  * Function Name: main
@@ -108,19 +159,31 @@ int main(void)
 {
     /* Stores result following specific operations */
     cy_rslt_t result;
+    cy_en_sysint_status_t intr_result;
 
-    /* Array containing the data bytes received from host */
-    uint8_t buffer[USB_BUFFER_SIZE];
-
-    /* Stores the USBFS return code following specific operations */
-    cy_en_usb_dev_status_t status;
+    uint16_t length;
+    uint32_t actread_no = 0;
 
     /* Initialize the device and board peripherals */
     result = cybsp_init();
     if (result != CY_RSLT_SUCCESS)
     {
-        CY_ASSERT(0);
+        CY_ASSERT(CY_ASSERT_FAILED);
     }
+
+#if DEBUG_PRINT
+    /* Configure and enable the UART peripheral */
+    Cy_SCB_UART_Init(CYBSP_UART_HW, &CYBSP_UART_config, &UART_context);
+    Cy_SCB_UART_Enable(CYBSP_UART_HW);
+
+    /* Sequence to clear screen */
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "\x1b[2J\x1b[;H");
+
+    /* Print "USB FS Vendor Interface" */
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "****************** ");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "PMG1 MCU: USB FS Vendor Interface");
+    Cy_SCB_UART_PutString(CYBSP_UART_HW, "****************** \r\n\n");
+#endif
 
     /* Enable global interrupts */
     __enable_irq();
@@ -129,13 +192,39 @@ int main(void)
     status = Cy_USB_Dev_Init(CYBSP_USB_HW, &CYBSP_USB_config, &usb_drvContext, &usb_devices[0], &usb_devConfig, &usb_devContext);
     if (status != CY_USB_DEV_SUCCESS)
     {
-        CY_ASSERT(0);
+#if DEBUG_PRINT
+        check_status("API Cy_USB_Dev_Init failed with error code", status);
+#endif
+        CY_ASSERT(CY_ASSERT_FAILED);
     }
 
     /* Initialize the USB interrupts */
-    Cy_SysInt_Init(&usb_high_interrupt_cfg, &usb_high_isr);
-    Cy_SysInt_Init(&usb_medium_interrupt_cfg, &usb_medium_isr);
-    Cy_SysInt_Init(&usb_low_interrupt_cfg, &usb_low_isr);
+    intr_result = Cy_SysInt_Init(&usb_high_interrupt_cfg, &usb_high_isr);
+    if (intr_result != CY_SYSINT_SUCCESS)
+    {
+#if DEBUG_PRINT
+        check_status("API Cy_SysInt_Init failed with error code", intr_result);
+#endif
+        CY_ASSERT(CY_ASSERT_FAILED);
+    }
+
+    intr_result = Cy_SysInt_Init(&usb_medium_interrupt_cfg, &usb_medium_isr);
+    if (intr_result != CY_SYSINT_SUCCESS)
+    {
+#if DEBUG_PRINT
+       check_status("API Cy_SysInt_Init failed with error code", intr_result);
+#endif
+       CY_ASSERT(CY_ASSERT_FAILED);
+    }
+
+    intr_result = Cy_SysInt_Init(&usb_low_interrupt_cfg, &usb_low_isr);
+    if (intr_result != CY_SYSINT_SUCCESS)
+    {
+#if DEBUG_PRINT
+       check_status("API Cy_SysInt_Init failed with error code", intr_result);
+#endif
+       CY_ASSERT(CY_ASSERT_FAILED);
+    }
 
     /* Enable the USB interrupts */
     NVIC_EnableIRQ(usb_high_interrupt_cfg.intrSrc);
@@ -146,19 +235,26 @@ int main(void)
      * it waits until the device enumerates */
     Cy_USB_Dev_Connect(true, CY_USB_DEV_WAIT_FOREVER, &usb_devContext);
 
-    uint16_t length;
-    uint32_t actread_no = 0;
-
     for (;;)
     {
+
         Cy_USB_Dev_StartReadEp (OUT_EP_NUM, &usb_devContext);
+
         /* Check if data was received. */
         if (CY_USB_DEV_SUCCESS == Cy_USB_Dev_ReadEpBlocking(OUT_EP_NUM, buffer, USB_BUFFER_SIZE, &actread_no, CY_USB_DEV_WAIT_FOREVER, &usb_devContext))
         {
             /* Read number of received data bytes. */
             length = Cy_USB_Dev_GetEpNumToRead(OUT_EP_NUM, &usb_devContext);
+
             Cy_USB_Dev_WriteEpNonBlocking(IN_EP_NUM, buffer, length, &usb_devContext);
         }
+#if DEBUG_PRINT
+        if (ENTER_LOOP)
+        {
+            Cy_SCB_UART_PutString(CYBSP_UART_HW, "Entered for loop \r\n");
+            ENTER_LOOP = false;
+        }
+#endif
     }
 }
 
@@ -202,4 +298,3 @@ static void usb_low_isr(void)
 }
 
 /* [] END OF FILE */
-
